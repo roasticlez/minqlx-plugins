@@ -49,12 +49,14 @@ class banvote(minqlx.Plugin):
         if len(msg) < 4:
             return minqlx.RET_USAGE               
         
-        try:
+        try:            
             ident = int(msg[1])
             target_player = None
-            if 0 <= ident < 64:
-                target_player = self.player(ident)
-                ident = target_player.steam_id
+            
+            if 0 <= ident < 64:                
+                target_player = self.player(ident)                
+                ident = target_player.steam_id            
+            
         except ValueError:
             channel.reply("Invalid ID. Use either a client ID or a SteamID64.")
             return
@@ -65,24 +67,24 @@ class banvote(minqlx.Plugin):
         if target_player:
             name = target_player.name
         else:
-            name = ident        
+            name = ident                
 
-        # Players with permissions level 1 or higher cannot be banned from voting.
-        if self.db.has_permission(target_player.steam_id, 1):
+        # Players with permissions level 1 or higher cannot be banned from voting.        
+        if self.db.has_permission(ident, 1):
             channel.reply("^7{} ^3has permission level 1 or higher and cannot be banned from voting.".format(name))
-            return      
+            return              
             
         if len(msg) > 4:
             reason = " ".join(msg[4:])
         else:
-            reason = ""
-                       
+            reason = ""        
+        
         r = LENGTH_REGEX.match(" ".join(msg[2:4]).lower())
         if r:
             number = float(r.group("number"))
             if number <= 0: return
             scale = r.group("scale").rstrip("s")
-            td = None
+            td = None            
             
             if scale == "second":
                 td = datetime.timedelta(seconds=number)
@@ -98,7 +100,7 @@ class banvote(minqlx.Plugin):
                 td = datetime.timedelta(days=number * 30)
             elif scale == "year":
                 td = datetime.timedelta(weeks=number * 52)                                                  
-
+            
             now = datetime.datetime.now().strftime(TIME_FORMAT)
             expires = (datetime.datetime.now() + td).strftime(TIME_FORMAT)                 
             base_key = PLAYER_KEY.format(ident) + ":votebans"            
@@ -118,16 +120,18 @@ class banvote(minqlx.Plugin):
 
         try:
             ident = int(msg[1])
-            target_player = None
+            target_player = None            
             if 0 <= ident < 64:
                 target_player = self.player(ident)
-                ident = target_player.steam_id
+                ident = target_player.steam_id                
+            
         except ValueError:
             channel.reply("Invalid ID. Use either a client ID or a SteamID64.")
             return
         except minqlx.NonexistentPlayerError:
             channel.reply("Invalid client ID. Use either a client ID or a SteamID64.")
             return
+        
         
         if target_player:
             name = target_player.name
