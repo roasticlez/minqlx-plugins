@@ -15,6 +15,7 @@ import minqlx.database
 import datetime
 import time
 import re
+from operator import itemgetter
 
 LENGTH_REGEX = re.compile(r"(?P<number>[0-9]+) (?P<scale>seconds?|minutes?|hours?|days?|weeks?|months?|years?)")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -29,6 +30,7 @@ class banvote(minqlx.Plugin):
         self.add_hook("vote_called", self.handle_vote_called, priority=minqlx.PRI_HIGH)
         self.add_command("banvote", self.cmd_banvote, 2, usage="<id> <length> seconds|minutes|hours|days|... [reason]")
         self.add_command("unbanvote", self.cmd_unbanvote, 2, usage="<id>")
+        self.add_command(("votebanned"), self.cmd_votebanned, 4)
 
     def handle_vote_called(self, player, vote, args):
         """Stops a banned player from voting."""
@@ -143,6 +145,31 @@ class banvote(minqlx.Plugin):
             db.execute()
             channel.reply("^6{}^7 has been unbanned from voting.".format(name))
 
+    def cmd_votebanned(self, player, msg, channel):        
+        """Outputs all votebanned players."""
+        @minqlx.thread
+        def votebans():            
+            players = []
+            for key in self.db.scan_iter("minqlx:players:765*:votebans"):                
+                steam_id = key.split(":")[2]                                
+                votebanned = self.is_votebanned(steam_id)                
+                expires = votebanned[0]
+                reason = votebanned[-1]
+                name = self.player_name(steam_id)                                    
+                players.append(dict(name=name, steam_id=steam_id, expires=str(expires), reason=reason))                
+                        
+            if players:                
+                output = ["^5{:^31} | {:^17} | {:^19} | {}".format("Name", "Steam ID", "Expires", "Reason")]
+                for p in sorted(players, key=itemgetter("expires")):
+                    output.append("{name:31} | {steam_id:17} | {expires:19} | {reason}".format(**p))
+                self.callback(player, command, output)
+            else:
+                self.callback(player, command, [])
+
+        command = msg[0][1:].lower()
+        votebans()
+        return minqlx.RET_STOP_ALL
+
     # ====================================================================
     #                               HELPERS
     # ====================================================================
@@ -160,3 +187,43 @@ class banvote(minqlx.Plugin):
             return expires, longest_voteban["reason"]
         
         return None   
+
+    @staticmethod
+    def callback(player, command, output):
+        """Tells player the output of the command.
+        If player is a DummyPlayer then decreases max_amount and
+        delay as to not disconnect the bot from IRC due to flooding."""
+        if output:            
+            if isinstance(player, minqlx.AbstractDummyPlayer):
+                tell_large_output(player, output, max_amount=1, delay=2)
+            else:
+                tell_large_output(player, output)
+        else:
+            if command == "permissions":
+                player.tell("There are no players with >= 1 permission level.")
+            else:
+                player.tell("There are no {} players.".format(command))
+
+    def player_name(self, steam_id):
+        """Returns the latest name a player has used."""
+        try:
+            name = self.db.lindex(PLAYER_KEY.format(steam_id), 0)
+            if not name:
+                raise KeyError
+            name = re.sub(r"\^[0-9]", "", name)  # remove colour tags
+        except KeyError:
+            name = steam_id
+        return name
+
+def tell_large_output(player, output, max_amount=25, delay=0.4):
+    """Tells large output in small portions, as not to disconnected the player.
+    :param player: Player to tell to.
+    :param output: Output to send to player.
+    :param max_amount: Max amount of lines to send at once.
+    :param delay: Time to sleep between large inputs.
+    """
+    for count, line in enumerate(output, start=1):
+        if count % max_amount == 0:
+            time.sleep(delay)
+        player.tell(line)
+
