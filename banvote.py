@@ -12,8 +12,13 @@ Ban players from voting.
 
 import minqlx
 import minqlx.database
+import datetime
+import time
+import re
 
-BANVOTE_KEY = "minqlx:vote_ban"
+LENGTH_REGEX = re.compile(r"(?P<number>[0-9]+) (?P<scale>seconds?|minutes?|hours?|days?|weeks?|months?|years?)")
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+PLAYER_KEY = "minqlx:players:{}"
 
 
 class banvote(minqlx.Plugin):
@@ -22,72 +27,136 @@ class banvote(minqlx.Plugin):
     def __init__(self):
         super().__init__()
         self.add_hook("vote_called", self.handle_vote_called, priority=minqlx.PRI_HIGH)
-        self.add_command("banvote", self.cmd_banvote, 2, usage="<id>")
+        self.add_command("banvote", self.cmd_banvote, 2, usage="<id> <length> seconds|minutes|hours|days|... [reason]")
         self.add_command("unbanvote", self.cmd_unbanvote, 2, usage="<id>")
 
     def handle_vote_called(self, player, vote, args):
         """Stops a banned player from voting."""
-        if self.db.sismember(BANVOTE_KEY, player.steam_id):
-            if len(self.teams()["free"] + self.teams()["red"] + self.teams()["blue"]) > 1:
-                player.tell("You are banned from voting.")
+        votebanned = self.is_votebanned(player.steam_id)
+        if votebanned:
+            expires, reason = votebanned
+            if reason:
+                player.tell("You are banned from voting until {}: {}".format(expires, reason))
+                return minqlx.RET_STOP_ALL
+            else:
+                player.tell("You are banned from voting until {}.".format(expires))
                 return minqlx.RET_STOP_ALL
 
     def cmd_banvote(self, player, msg, channel):
         """Bans a player from voting."""
-        if len(msg) < 2:
-            return minqlx.RET_USAGE
-
-        steam_id, name = self.get_player(msg[1], channel)
-        if steam_id is None:
-            return
-
-        # Players with permissions level 1 or higher cannot be banned from voting.
-        if self.db.has_permission(steam_id, 1):
-            channel.reply("^7{} ^3has permission level 1 or higher and cannot be banned from voting.".format(name))
-            return
-
-        if self.db.sismember(BANVOTE_KEY, steam_id):
-            channel.reply("^7{} ^3is already banned from voting".format(name))
-        else:
-            self.db.sadd(BANVOTE_KEY, steam_id)
-            channel.reply("^7{} ^1has been banned from voting".format(name))
-
-    def cmd_unbanvote(self, player, msg, channel):
-        """Unbans a player from voting."""
-        if len(msg) < 2:
-            return minqlx.RET_USAGE
-
-        steam_id, name = self.get_player(msg[1], channel)
-        if steam_id is None:
-            return
-
-        if self.db.sismember(BANVOTE_KEY, steam_id):
-            self.db.srem(BANVOTE_KEY, steam_id)
-            channel.reply("^7{} ^2is now unbanned from voting.".format(name))
-        else:
-            channel.reply("^7{} ^3is not banned from voting.".format(name))
-
-    def get_player(self, ident, channel):
-        """Gets name and id a of player.
-        :param ident: Client or Steam ID.
-        :param channel: Channel to reply to.
-        """
+        if len(msg) < 4:
+            return minqlx.RET_USAGE               
+        
         try:
-            ident = int(ident)
+            ident = int(msg[1])
             target_player = None
             if 0 <= ident < 64:
                 target_player = self.player(ident)
                 ident = target_player.steam_id
         except ValueError:
             channel.reply("Invalid ID. Use either a client ID or a SteamID64.")
-            return None, None
+            return
         except minqlx.NonexistentPlayerError:
             channel.reply("Invalid client ID. Use either a client ID or a SteamID64.")
-            return None, None
+            return        
+        
+        if target_player:
+            name = target_player.name
+        else:
+            name = ident        
 
+        # Players with permissions level 1 or higher cannot be banned from voting.
+        if self.db.has_permission(target_player.steam_id, 1):
+            channel.reply("^7{} ^3has permission level 1 or higher and cannot be banned from voting.".format(name))
+            return      
+            
+        if len(msg) > 4:
+            reason = " ".join(msg[4:])
+        else:
+            reason = ""
+                       
+        r = LENGTH_REGEX.match(" ".join(msg[2:4]).lower())
+        if r:
+            number = float(r.group("number"))
+            if number <= 0: return
+            scale = r.group("scale").rstrip("s")
+            td = None
+            
+            if scale == "second":
+                td = datetime.timedelta(seconds=number)
+            elif scale == "minute":
+                td = datetime.timedelta(minutes=number)
+            elif scale == "hour":
+                td = datetime.timedelta(hours=number)
+            elif scale == "day":
+                td = datetime.timedelta(days=number)
+            elif scale == "week":
+                td = datetime.timedelta(weeks=number)
+            elif scale == "month":
+                td = datetime.timedelta(days=number * 30)
+            elif scale == "year":
+                td = datetime.timedelta(weeks=number * 52)                                                  
+
+            now = datetime.datetime.now().strftime(TIME_FORMAT)
+            expires = (datetime.datetime.now() + td).strftime(TIME_FORMAT)                 
+            base_key = PLAYER_KEY.format(ident) + ":votebans"            
+            voteban_id = self.db.zcard(base_key)            
+            db = self.db.pipeline()            
+            db.zadd(base_key, time.time() + td.total_seconds(), voteban_id)            
+            voteban = {"expires": expires, "reason": reason, "issued": now, "issued_by": player.steam_id}            
+            db.hmset(base_key + ":{}".format(voteban_id), voteban)            
+            db.execute()            
+
+            channel.reply("^7{} ^1has been banned from voting. Ban expires on ^6{}^7.".format(name, expires))
+
+    def cmd_unbanvote(self, player, msg, channel):
+        """Unbans a player from voting."""
+        if len(msg) < 2:
+            return minqlx.RET_USAGE
+
+        try:
+            ident = int(msg[1])
+            target_player = None
+            if 0 <= ident < 64:
+                target_player = self.player(ident)
+                ident = target_player.steam_id
+        except ValueError:
+            channel.reply("Invalid ID. Use either a client ID or a SteamID64.")
+            return
+        except minqlx.NonexistentPlayerError:
+            channel.reply("Invalid client ID. Use either a client ID or a SteamID64.")
+            return
+        
         if target_player:
             name = target_player.name
         else:
             name = ident
 
-        return ident, name
+        base_key = PLAYER_KEY.format(ident) + ":votebans"
+        votebans = self.db.zrangebyscore(base_key, time.time(), "+inf", withscores=True)
+        if not votebans:
+            channel.reply("^7 No active banvotes on ^6{}^7 found.".format(name))
+        else:
+            db = self.db.pipeline()
+            for voteban_id, score in votebans:
+                db.zincrby(base_key, voteban_id, -score)
+            db.execute()
+            channel.reply("^6{}^7 has been unbanned from voting.".format(name))
+
+    # ====================================================================
+    #                               HELPERS
+    # ====================================================================
+
+    def is_votebanned(self, steam_id):
+        
+        base_key = PLAYER_KEY.format(steam_id) + ":votebans"
+        votebans = self.db.zrangebyscore(base_key, time.time(), "+inf", withscores=True)
+        if not votebans:
+            return None
+
+        longest_voteban = self.db.hgetall(base_key + ":{}".format(votebans[-1][0]))
+        expires = datetime.datetime.strptime(longest_voteban["expires"], TIME_FORMAT)
+        if (expires - datetime.datetime.now()).total_seconds() > 0:
+            return expires, longest_voteban["reason"]
+        
+        return None   
